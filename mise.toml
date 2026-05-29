@@ -1,0 +1,112 @@
+# CUSTOM — fork-local mise config (not upstream). See .changes/implementation-notes.md.
+
+[tools]
+rust = "stable"
+# CUSTOM: pre-commit hook runner (hk) + its Pkl evaluator, and secret scanners.
+hk = "1.45.0"
+pkl = "latest"
+gitleaks = "latest"
+trufflehog = "latest"
+
+# CUSTOM tasks for the threads-sidebar status-icon/tint work.
+[tasks.build]
+description = "Build the zed binary"
+run = "cargo build -p zed"
+
+[tasks.run]
+description = "Run zed from source"
+run = "cargo run -p zed"
+
+[tasks.clippy]
+description = "Lint via repo clippy script"
+run = "./script/clippy"
+
+[tasks.fmt]
+description = "Format rust sources"
+run = "cargo fmt"
+
+[tasks.test-ui]
+description = "Test the ui crate (thread_item lives here)"
+run = "cargo test -p ui"
+
+[tasks.test-sidebar]
+description = "Test the sidebar crate (thread switcher list)"
+run = "cargo test -p sidebar"
+
+[tasks.check]
+description = "fmt + clippy gate before commit"
+depends = ["fmt", "clippy"]
+
+# CUSTOM: smoke-test the cli-agent status plugin (writes then shows a status file).
+[tasks.plugin-status-test]
+description = "Smoke-test the zed-cli-agent status reporter"
+run = """
+script="tooling/zed-cli-agent-status/plugins/zed-cli-agent/scripts/report-status.sh"
+echo '{"session_id":"test"}' | CLAUDE_PROJECT_DIR="$PWD" "$script" running
+dir="${XDG_STATE_HOME:-$HOME/.local/state}/zed/cli-agent-status"
+echo "status files in $dir:"
+ls -1 "$dir" 2>/dev/null
+echo "--- contents ---"
+cat "$dir"/*.json 2>/dev/null
+"""
+
+# CUSTOM: native release install of "Zed Custom" (coexists with official Zed and
+# the cargo-run dev instance). Stable self-signed so macOS TCC grants survive
+# rebuilds. See script/zed-custom-publish.sh and the codesign notes.
+[tasks."cert:create"]
+description = "One-time: create the 'Zed Custom Dev' code-signing cert in the login keychain"
+run = """
+set -euo pipefail
+[ "$(uname -s)" = "Darwin" ] || { echo "cert:create is macOS-only"; exit 0; }
+
+CERT="${ZED_CUSTOM_CERT:-Zed Custom Dev}"
+LOGIN_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+
+if security find-identity -p codesigning -v "$LOGIN_KEYCHAIN" 2>/dev/null | grep -F "$CERT" >/dev/null; then
+  echo "identity '$CERT' already present"
+  exit 0
+fi
+
+security delete-identity    -c "$CERT" "$LOGIN_KEYCHAIN" >/dev/null 2>&1 || true
+security delete-certificate  -c "$CERT" "$LOGIN_KEYCHAIN" >/dev/null 2>&1 || true
+
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+cat > "$TMP/cert.conf" <<CONF
+[req]
+prompt             = no
+distinguished_name = dn
+x509_extensions    = v3_req
+[dn]
+CN = $CERT
+[v3_req]
+keyUsage             = critical, digitalSignature
+extendedKeyUsage     = critical, codeSigning
+basicConstraints     = critical, CA:FALSE
+subjectKeyIdentifier = hash
+CONF
+
+openssl genrsa -out "$TMP/key.pem" 2048 2>/dev/null
+openssl req -x509 -key "$TMP/key.pem" -sha256 -days 3650 -out "$TMP/cert.pem" -config "$TMP/cert.conf" 2>/dev/null
+# /usr/bin/openssl is LibreSSL; Homebrew openssl@3 emits a PKCS12 that
+# `security import` rejects ("MAC verification failed").
+/usr/bin/openssl pkcs12 -export -inkey "$TMP/key.pem" -in "$TMP/cert.pem" -name "$CERT" -passout pass:devpass -out "$TMP/cert.p12"
+security import "$TMP/cert.p12" -k "$LOGIN_KEYCHAIN" -P "devpass" -T /usr/bin/codesign -T /usr/bin/security
+echo "created '$CERT' (login keychain may still prompt to unlock on first use)"
+"""
+
+[tasks.publish]
+description = "Build + stable-sign + install the native 'Zed Custom' app to /Applications"
+depends = ["cert:create"]
+run = "./script/zed-custom-publish.sh"
+
+[tasks."publish:diag"]
+description = "Show the installed Zed Custom signature, designated requirement, and bundle id"
+run = """
+set -euo pipefail
+[ "$(uname -s)" = "Darwin" ] || { echo skipping; exit 0; }
+APP="/Applications/${ZED_CUSTOM_APP_NAME:-ZedCustom}.app"
+[ -d "$APP" ] || { echo "not installed: $APP" >&2; exit 1; }
+codesign -d --verbose=4 "$APP" 2>&1 | grep -E '^(Identifier|Authority|CDHash|Format)='
+codesign -d -r- "$APP" 2>&1 | grep designated
+/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Contents/Info.plist"
+"""

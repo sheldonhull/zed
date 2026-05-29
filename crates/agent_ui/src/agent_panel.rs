@@ -2001,8 +2001,12 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         let terminal_working_directory = working_directory.clone();
+        // CUSTOM (fork): inject a stable per-terminal id so CLI agents and their
+        // (detached) hooks can report status back to this exact terminal row.
+        let extra_env =
+            HashMap::from_iter([("ZED_TERMINAL_ID".to_string(), terminal_id.to_string())]);
         let terminal_task = self.project.update(cx, |project, cx| {
-            project.create_terminal_shell(working_directory, cx)
+            project.create_terminal_shell_with_env(working_directory, extra_env, cx)
         });
         let workspace = self.workspace.clone();
         let workspace_id = self.workspace_id;

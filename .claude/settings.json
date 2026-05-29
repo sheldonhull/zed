@@ -1,0 +1,55 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR/tooling/zed-cli-agent-status/plugins/zed-cli-agent/scripts/report-status.sh\" idle" }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR/tooling/zed-cli-agent-status/plugins/zed-cli-agent/scripts/report-status.sh\" running" }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR/tooling/zed-cli-agent-status/plugins/zed-cli-agent/scripts/report-status.sh\" running" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR/tooling/zed-cli-agent-status/plugins/zed-cli-agent/scripts/report-status.sh\" running" }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR/tooling/zed-cli-agent-status/plugins/zed-cli-agent/scripts/report-status.sh\" needs_input" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR/tooling/zed-cli-agent-status/plugins/zed-cli-agent/scripts/report-status.sh\" done" }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR/tooling/zed-cli-agent-status/plugins/zed-cli-agent/scripts/report-status.sh\" idle --remove" }
+        ]
+      }
+    ]
+  }
+}

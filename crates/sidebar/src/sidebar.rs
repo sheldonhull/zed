@@ -1,5 +1,8 @@
 mod thread_switcher;
 
+// CUSTOM (fork): reads CLI-agent session status from the side-channel status dir.
+mod cli_agent_status;
+
 use acp_thread::ThreadStatus;
 use action_log::DiffStats;
 use agent::{ThreadStore, ZED_AGENT_ID};
@@ -366,6 +369,10 @@ struct TerminalEntry {
     workspace: ThreadEntryWorkspace,
     worktrees: Vec<ThreadItemWorktreeInfo>,
     has_notification: bool,
+    // CUSTOM (fork): live CLI-agent status for this terminal, matched by id.
+    status: AgentThreadStatus,
+    // CUSTOM (fork): true when an agent is present but idle/done (vs plain terminal).
+    agent_idle: bool,
     highlight_positions: Vec<usize>,
 }
 
@@ -792,6 +799,11 @@ pub struct Sidebar {
     /// Display names of other release channels that have threads available to
     /// import.
     cross_channel_import_channels: Vec<SharedString>,
+    /// CUSTOM (fork): latest CLI-agent statuses keyed by project directory, polled
+    /// from the side-channel status dir written by the zed-cli-agent plugin. Used
+    /// to tint terminal thread rows by live agent state.
+    cli_agent_statuses: HashMap<String, cli_agent_status::CliAgentStatus>,
+    _cli_agent_status_poll: Task<()>,
 }
 
 impl Sidebar {
@@ -889,6 +901,28 @@ impl Sidebar {
             this.schedule_update_entries(false, cx);
         });
 
+        // CUSTOM (fork): poll the CLI-agent status directory off the UI thread so
+        // terminal rows reflect live agent state. Rebuilds entries only on change.
+        let cli_agent_status_poll = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(1000))
+                    .await;
+                let next = cx
+                    .background_spawn(async { cli_agent_status::read_all() })
+                    .await;
+                let still_alive = this.update(cx, |this, cx| {
+                    if this.cli_agent_statuses != next {
+                        this.cli_agent_statuses = next;
+                        this.update_entries(cx);
+                    }
+                });
+                if still_alive.is_err() {
+                    break;
+                }
+            }
+        });
+
         Self {
             multi_workspace: multi_workspace.downgrade(),
             width: DEFAULT_WIDTH,
@@ -922,6 +956,8 @@ impl Sidebar {
             update_task: None,
             import_banners_use_verbose_labels: None,
             cross_channel_import_channels: Vec::new(),
+            cli_agent_statuses: HashMap::new(),
+            _cli_agent_status_poll: cli_agent_status_poll,
         }
     }
 
@@ -1457,17 +1493,31 @@ impl Sidebar {
             };
             let linked_worktree_path_lists =
                 linked_worktree_path_lists_for_workspaces(group_workspaces, cx);
+            // CUSTOM (fork): snapshot CLI-agent statuses so the closure does not
+            // borrow `self`; the map is small (one entry per active agent).
+            let cli_agent_statuses = self.cli_agent_statuses.clone();
             let make_terminal_entry =
                 |metadata: TerminalThreadMetadata, workspace: ThreadEntryWorkspace| {
                     let worktrees =
                         worktree_info_from_thread_paths(&metadata.worktree_paths, &branch_by_path);
                     let has_notification =
                         live_notified_terminal_ids.contains(&metadata.terminal_id);
+                    // CUSTOM (fork): match this terminal to a reported status by the
+                    // injected ZED_TERMINAL_ID (the terminal id the agent inherits).
+                    let cli_status = cli_agent_statuses
+                        .get(&metadata.terminal_id.to_string())
+                        .copied();
+                    let status = cli_status
+                        .map(|status| status.to_thread_status())
+                        .unwrap_or_default();
+                    let agent_idle = cli_status.is_some_and(|status| status.is_idle());
                     TerminalEntry {
                         metadata,
                         workspace,
                         worktrees,
                         has_notification,
+                        status,
+                        agent_idle,
                         highlight_positions: Vec::new(),
                     }
                 };
@@ -6499,6 +6549,9 @@ impl Sidebar {
             .worktrees(worktrees)
             .timestamp(timestamp)
             .notified(terminal.has_notification)
+            // CUSTOM (fork): tint + status icon driven by the reported CLI-agent state.
+            .status(terminal.status)
+            .agent_idle(terminal.agent_idle)
             .highlight_positions(highlight_positions)
             .selected(is_active)
             .focused(is_focused)

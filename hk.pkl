@@ -1,0 +1,29 @@
+/// CUSTOM (fork): pre-commit hooks for this fork — format + check Rust and scan
+/// for secrets before committing. Not upstream; drop on rebase if it conflicts.
+amends "package://github.com/jdx/hk/releases/download/v1.45.0/hk@1.45.0#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v1.45.0/hk@1.45.0#/Builtins.pkl"
+
+hooks {
+  ["pre-commit"] {
+    // Auto-format and stage fixes; stash unstaged changes while hooks run.
+    fix = true
+    stash = "git"
+    steps {
+      // Rust: format (auto-fix) then lint the changed crate.
+      ["cargo-fmt"] = Builtins.cargo_fmt
+      ["cargo-clippy"] = Builtins.cargo_clippy
+      // Secret scanning. Scan only the STAGED diff so build artifacts under
+      // target/ (gitignored) are never scanned. `gitleaks git --staged` delegates
+      // to git, so it works inside worktrees.
+      ["gitleaks"] {
+        check = "gitleaks git --staged --redact --no-banner ."
+      }
+      // trufflehog has no builtin; scan only the changed files in filesystem mode
+      // (worktree-safe). Fails the commit on a verified/unknown secret.
+      ["trufflehog"] {
+        glob = "*"
+        check = "trufflehog filesystem {{files}} --no-update --fail --results=verified,unknown"
+      }
+    }
+  }
+}

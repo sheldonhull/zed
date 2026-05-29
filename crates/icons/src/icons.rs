@@ -59,6 +59,7 @@ pub enum IconName {
     CaseSensitive,
     Chat,
     Check,
+    CheckCircle,
     CheckDouble,
     ChevronDown,
     ChevronDownUp,
