@@ -7,15 +7,12 @@ lives under `tooling/`.
 
 Plugin docs: `tooling/zed-cli-agent-status/README.md`.
 
-## Install (pinned to a fork ref)
-
-Replace `<owner>/<repo>` with this fork's GitHub repo and `<ref>` with the branch,
-tag, or commit. Requires the branch to be pushed.
+## Install (pinned to the fork ref)
 
 ### CLI
 
 ```sh
-claude plugin marketplace add <owner>/<repo>@<ref>
+claude plugin marketplace add sheldonhull/zed@feat/threads-sidebar-improvements
 claude plugin install zed-cli-agent@zed-fork-tools
 ```
 
@@ -28,7 +25,7 @@ ref — the ref is fixed here (or at `marketplace add` time).
 {
   "extraKnownMarketplaces": {
     "zed-fork-tools": {
-      "source": { "source": "github", "repo": "<owner>/<repo>", "ref": "<ref>" },
+      "source": { "source": "github", "repo": "sheldonhull/zed", "ref": "feat/threads-sidebar-improvements" },
       "autoUpdate": false
     }
   },
@@ -41,6 +38,6 @@ ref — the ref is fixed here (or at `marketplace add` time).
 ### Local checkout (dev; uses the working tree, no ref)
 
 ```sh
-claude plugin marketplace add /abs/path/to/<repo>
+claude plugin marketplace add /abs/path/to/zed-worktree
 claude plugin install zed-cli-agent@zed-fork-tools
 ```
