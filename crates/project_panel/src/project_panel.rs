@@ -73,8 +73,8 @@ use util::{
     rel_path::{RelPath, RelPathBuf},
 };
 use workspace::{
-    DraggedSelection, OpenInTerminal, OpenMode, OpenOptions, OpenVisible, PreviewTabsSettings,
-    SelectedEntry, SplitDirection, Workspace,
+    DraggedSelection, MultiWorkspace, OpenInTerminal, OpenMode, OpenOptions, OpenVisible,
+    PreviewTabsSettings, SelectedEntry, SplitDirection, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
     notifications::{DetachAndPromptErr, NotifyResultExt, NotifyTaskExt},
 };
@@ -353,6 +353,8 @@ actions!(
         RevealInFileManager,
         /// Removes the selected folder from the project.
         RemoveFromProject,
+        /// Adds the selected folder as its own thread project (project group).
+        AddAsThreadProject,
         /// Cuts the selected file or directory.
         Cut,
         /// Pastes the previously cut or copied item.
@@ -1140,6 +1142,12 @@ impl ProjectPanel {
                             .when(is_dir, |menu| {
                                 menu.separator()
                                     .action("Find in Folder…", Box::new(NewSearchInDirectory))
+                            })
+                            .when(is_dir && is_local, |menu| {
+                                menu.action(
+                                    "Add as Thread Project",
+                                    Box::new(AddAsThreadProject),
+                                )
                             })
                             .when(is_unfoldable, |menu| {
                                 menu.action("Unfold Directory", Box::new(UnfoldDirectory))
@@ -3646,6 +3654,50 @@ impl ProjectPanel {
                 )
             }
         }
+    }
+
+    fn add_as_thread_project(
+        &mut self,
+        _: &AddAsThreadProject,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Compute the folder path in a scoped block so the immutable `cx`
+        // borrow held by `selected_sub_entry` ends before we spawn and
+        // re-enter the window to mutate the multi-workspace.
+        let abs_path = {
+            let Some((worktree, entry)) = self.selected_sub_entry(cx) else {
+                return;
+            };
+            if !entry.is_dir() {
+                return;
+            }
+            match &entry.canonical_path {
+                Some(canonical_path) => canonical_path.to_path_buf(),
+                None => worktree.read(cx).absolutize(&entry.path),
+            }
+        };
+
+        // The project panel only lives inside a `MultiWorkspace` window; this
+        // downcast yields the entity whose `open_project` creates a new thread
+        // project group (the same path as the "Add Local Folders" button).
+        let Some(handle) = window.window_handle().downcast::<MultiWorkspace>() else {
+            return;
+        };
+
+        // Defer the window mutation into a spawned task: we're currently inside
+        // the window's update, so re-entering it synchronously would panic.
+        cx.spawn_in(window, async move |_this, cx| {
+            if let Some(task) = handle
+                .update(cx, |multi_workspace, window, cx| {
+                    multi_workspace.open_project(vec![abs_path], OpenMode::Activate, window, cx)
+                })
+                .log_err()
+            {
+                task.await.log_err();
+            }
+        })
+        .detach();
     }
 
     pub fn new_search_in_directory(
@@ -6801,6 +6853,7 @@ impl Render for ProjectPanel {
                         el.on_action(cx.listener(Self::reveal_in_finder))
                             .on_action(cx.listener(Self::open_system))
                             .on_action(cx.listener(Self::open_in_terminal))
+                            .on_action(cx.listener(Self::add_as_thread_project))
                     },
                 )
                 .when(project.is_via_remote_server(), |el| {
