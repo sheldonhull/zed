@@ -99,6 +99,20 @@ description = "Build + stable-sign + install the native 'Zed Custom' app to /App
 depends = ["cert:create"]
 run = "./script/zed-custom-publish.sh"
 
+# Phase 1 of the background workflow: full release build + bundle, NO copy to
+# /Applications. Safe to run in the background while Zed Custom keeps running.
+# Records the bundle path for `publish:install` to pick up. Finish with that task.
+[tasks."build:prod"]
+description = "Release build + bundle only (no /Applications copy). Background-safe; finish with publish:install"
+run = "ZED_CUSTOM_MODE=build ./script/zed-custom-publish.sh"
+
+# Phase 2: copy the bundle built by `build:prod` into /Applications. Never runs
+# cargo, so no rebuild when code is unchanged. Waits for Zed Custom to quit first.
+[tasks."publish:install"]
+description = "Copy the build:prod bundle into /Applications (no rebuild). Quit Zed Custom first"
+depends = ["cert:create"]
+run = "ZED_CUSTOM_MODE=install ./script/zed-custom-publish.sh"
+
 [tasks."publish:diag"]
 description = "Show the installed Zed Custom signature, designated requirement, and bundle id"
 run = """

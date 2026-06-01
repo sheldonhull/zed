@@ -30,11 +30,23 @@ an older Zed without the injection), the script writes nothing.
 | SessionStart                    | `idle`         | idle agent (gray bell-off), no tint |
 | UserPromptSubmit                | `running`      | spinner, blue tint                  |
 | PreToolUse / PostToolUse        | `running`      | spinner, blue tint                  |
-| Notification                    | `needs_input`  | bell, orange tint                   |
+| Notification (permission prompt) | `needs_input` | bell, orange tint                   |
+| Notification (idle nudge)       | `idle`         | idle agent (gray bell-off), no tint |
 | Stop                            | `done`         | idle agent (gray bell-off), no tint |
 | SessionEnd                      | (file removed) | plain terminal icon                 |
 
 `error` is also supported (red triangle) if a hook reports it.
+
+The `Notification` hook fires both when Claude needs a permission or confirmation
+decision and when it has been idle for about a minute ("Claude is waiting for
+your input").
+The idle nudge also fires while a `/loop` or ralph-loop session sleeps between
+iterations, where no input is actually required.
+So `report-status.sh` inspects the notification `message`: a permission or
+confirmation prompt keeps `needs_input` (orange tint), and any other notification
+becomes `idle`.
+This keeps the orange "waiting for confirmation" tint meaningful and stops an
+autonomous loop from looking blocked.
 
 Icon legend in the sidebar rail:
 

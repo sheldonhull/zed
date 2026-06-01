@@ -135,6 +135,37 @@ Other entities can then register a callback to handle these events by doing `cx.
 
 - Use `./script/clippy` instead of `cargo clippy`
 
+### Fork: native "Zed Custom" build and publish (macOS)
+
+The fork installs a self-signed native app under a stable path and bundle id so
+macOS TCC grants survive rebuilds. The release build is slow, and copying over a
+running app is unsafe, so the build is split from the install. Use the mise tasks
+rather than calling the script directly:
+
+- `mise run build:prod` — release build and bundle only. Does NOT copy to
+  `/Applications` and does NOT block, so it is safe to run in the background
+  while Zed Custom keeps running. It records the bundle path and fires a desktop
+  notification when done.
+- `mise run publish:install` — copies the bundle that `build:prod` produced into
+  `/Applications`. Never runs cargo, so there is no rebuild when the code is
+  unchanged. It waits for Zed Custom to quit before swapping.
+- `mise run publish` — build and install in one shot, for a manual one-off.
+
+Background install flow for an agent: run `build:prod` in the background; when it
+finishes, prompt with AskUserQuestion to confirm the user is ready to copy, since
+installing requires quitting their running Zed Custom; on confirmation run
+`publish:install`. Never kill a running Zed Custom — wait for the user to quit.
+
+### Fork: CLI-agent status plugin
+
+The sidebar tints terminal agent rows from a status file written by the
+`tooling/zed-cli-agent-status` Claude Code plugin (`hooks.json` plus
+`report-status.sh`). The sidebar Rust (`crates/sidebar/src/cli_agent_status.rs`)
+only renders the status string; the classification lives in the plugin. Editing
+those plugin shell scripts and hooks is safe, reversible, and needs no rebuild
+(the running Zed reads the status file live), so apply such changes directly
+without asking for permission.
+
 # Pull request hygiene
 
 When an agent opens or updates a pull request, it must:

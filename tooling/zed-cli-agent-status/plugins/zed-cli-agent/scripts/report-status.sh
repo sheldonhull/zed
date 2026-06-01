@@ -39,13 +39,33 @@ fi
 
 ts=$(date +%s)
 
-# Best-effort session id from the hook's stdin JSON, without depending on jq.
+# Best-effort fields from the hook's stdin JSON, without depending on jq.
 session=""
+message=""
 if [ ! -t 0 ]; then
   payload=$(cat 2>/dev/null || true)
   session=$(printf '%s' "$payload" \
     | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
     | head -n1)
+  message=$(printf '%s' "$payload" \
+    | sed -n 's/.*"message"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | head -n1)
+fi
+
+# The Notification hook fires for two different reasons:
+#   - a real permission/confirmation prompt ("Claude needs your permission …")
+#   - a "Claude is waiting for your input" idle nudge after ~60s of inactivity.
+# The idle nudge also fires while a `/loop` or ralph-loop session sleeps between
+# iterations, where no input is actually required — so only the permission case
+# warrants the orange "waiting for confirmation" tint. Downgrade the idle nudge
+# to plain idle so an autonomous loop is not flagged as blocked. A missing
+# message (older Claude, or a non-Notification caller) keeps the requested
+# status, so this only narrows the Notification path.
+if [ "$status" = needs_input ] && [ -n "$message" ]; then
+  case "$message" in
+    *permission*|*Permission*|*approve*|*Approve*|*confirm*|*Confirm*) ;;
+    *) status=idle ;;
+  esac
 fi
 
 # Escape backslashes and double-quotes for safe JSON string values.
