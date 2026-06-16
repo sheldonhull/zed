@@ -31,6 +31,14 @@ case "$MODE" in
   *) echo "ZED_CUSTOM_MODE must be build|install|all (got: $MODE)" >&2; exit 1 ;;
 esac
 
+# Zed's cargo-bundle fork unwraps a term-crate color call; under TERM=dumb (e.g.
+# an agent/CI shell with no color capability) that panics with
+# Error(Term(ColorOutOfRange)). Force a 256-color TERM so the bundle step never
+# depends on the caller's terminal.
+if [ "${TERM:-dumb}" = dumb ]; then
+  export TERM=xterm-256color
+fi
+
 # Back-compat: ZED_CUSTOM_DEFER_INSTALL=1 used to mean "build, then wait for the
 # live app to quit before installing". Still honored for MODE=all.
 DEFER_INSTALL="${ZED_CUSTOM_DEFER_INSTALL:-0}"
@@ -144,7 +152,10 @@ plist="${DST}/Contents/Info.plist"
 
 # Stable self-signed signature (no hardened runtime — self-signed can't). This
 # overrides cargo-bundle's ad-hoc signature.
-if ! security find-identity -p codesigning -v 2>/dev/null | grep -qF "$CERT"; then
+# No -v: a self-signed dev cert is untrusted (CSSMERR_TP_NOT_TRUSTED) and so is
+# excluded from the "valid" list, but codesign still signs with it. Only require
+# that the identity (cert + private key) exists.
+if ! security find-identity -p codesigning 2>/dev/null | grep -qF "$CERT"; then
   echo "Signing identity '$CERT' not found. Run: mise run cert:create" >&2
   exit 1
 fi

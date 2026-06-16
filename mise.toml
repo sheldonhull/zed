@@ -62,7 +62,10 @@ set -euo pipefail
 CERT="${ZED_CUSTOM_CERT:-Zed Custom Dev}"
 LOGIN_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 
-if security find-identity -p codesigning -v "$LOGIN_KEYCHAIN" 2>/dev/null | grep -F "$CERT" >/dev/null; then
+# No -v: the self-signed dev cert is untrusted (CSSMERR_TP_NOT_TRUSTED) so it
+# never appears as a "valid" identity, but codesign signs with it fine. Matching
+# without -v keeps this idempotent so we don't regenerate the key every run.
+if security find-identity -p codesigning "$LOGIN_KEYCHAIN" 2>/dev/null | grep -F "$CERT" >/dev/null; then
   echo "identity '$CERT' already present"
   exit 0
 fi
