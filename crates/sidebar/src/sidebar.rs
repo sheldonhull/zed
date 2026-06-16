@@ -6222,7 +6222,6 @@ impl Sidebar {
         let is_hovered = self.hovered_thread_index == Some(ix);
         let is_selected = is_active;
         let is_draft = thread.draft.is_some();
-        let is_empty_draft = thread.draft == Some(DraftKind::Empty);
         let is_running = matches!(
             thread.status,
             AgentThreadStatus::Running | AgentThreadStatus::WaitingForConfirmation
@@ -6241,11 +6240,11 @@ impl Sidebar {
             .title_bar_background
             .blend(color.panel_background.opacity(0.25));
 
-        let timestamp: SharedString = if is_empty_draft {
-            SharedString::default()
-        } else {
-            format_history_entry_timestamp(Self::thread_display_time(&thread.metadata)).into()
-        };
+        // CUSTOM (fork): always show the relative time, even for the auto-created
+        // empty draft, so the default thread keeps its two-line layout. Upstream
+        // blanks this for empty drafts, which collapses the row to a single line.
+        let timestamp: SharedString =
+            format_history_entry_timestamp(Self::thread_display_time(&thread.metadata)).into();
 
         let is_remote = thread.workspace.is_remote(cx);
 
@@ -6361,8 +6360,10 @@ impl Sidebar {
                     )
                 } else {
                     match thread.draft {
-                        Some(DraftKind::Empty) => None,
-                        Some(DraftKind::WithContent) => Some(
+                        // CUSTOM (fork): allow discarding the empty default draft too,
+                        // so the auto-created thread can be dismissed. Upstream offers no
+                        // action for empty drafts.
+                        Some(DraftKind::Empty) | Some(DraftKind::WithContent) => Some(
                             IconButton::new("discard_thread", IconName::Close)
                                 .icon_size(IconSize::Small)
                                 .tooltip(Tooltip::text("Discard Draft"))

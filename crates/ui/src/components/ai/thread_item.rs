@@ -322,26 +322,28 @@ impl RenderOnce for ThreadItem {
         let icon_id = format!("icon-{}", self.id);
         let icon_visible = self.icon_visible;
         let icon_color = self.icon_color.unwrap_or(Color::Muted);
+        // CUSTOM (fork): full-height left rail holding a large status icon.
+        let rail_width = px(44.0);
+        let rail_icon_size = IconSize::Custom(rems(2.5));
+        // Built at the rail size: this is the Completed-status fallback glyph in the
+        // rail below, so it must match the other rail icons (running/waiting/error/
+        // idle) rather than render small.
         let agent_icon = if let Some(icon_char) = self.icon_char {
             Label::new(icon_char)
-                .size(LabelSize::Small)
+                .size(LabelSize::Large)
                 .color(icon_color)
                 .into_any_element()
         } else if let Some(custom_svg) = self.custom_icon_from_external_svg {
             Icon::from_external_svg(custom_svg)
                 .color(icon_color)
-                .size(IconSize::Small)
+                .size(rail_icon_size)
                 .into_any_element()
         } else {
             Icon::new(self.icon)
                 .color(icon_color)
-                .size(IconSize::Small)
+                .size(rail_icon_size)
                 .into_any_element()
         };
-
-        // CUSTOM (fork): full-height left rail holding a large status icon.
-        let rail_width = px(44.0);
-        let rail_icon_size = IconSize::Custom(rems(2.5));
         let rail_icon = match self.status {
             AgentThreadStatus::Running => Icon::new(IconName::LoadCircle)
                 .size(rail_icon_size)
