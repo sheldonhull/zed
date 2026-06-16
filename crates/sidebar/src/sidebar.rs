@@ -6593,7 +6593,11 @@ impl Sidebar {
         let is_remote = terminal.workspace.is_remote(cx);
 
         let display_title = terminal.metadata.display_title();
-        let (icon_char, title, highlight_positions) =
+        // CUSTOM (fork): strip a leading glyph from the title for display, but do NOT
+        // feed it as `icon_char`. The left rail already shows a large status icon; if
+        // `icon_char` is set, the rail renders that glyph as a tiny label instead of
+        // the full-size Terminal icon.
+        let (_icon_char, title, highlight_positions) =
             match split_leading_icon_char(&display_title, &terminal.highlight_positions) {
                 Some((icon_char, title, positions)) => (Some(icon_char), title, positions),
                 None => (None, display_title, terminal.highlight_positions.clone()),
@@ -6602,7 +6606,6 @@ impl Sidebar {
         ThreadItem::new(id, title)
             .base_bg(sidebar_bg)
             .icon(IconName::Terminal)
-            .when_some(icon_char, |this, icon_char| this.icon_char(icon_char))
             .is_remote(is_remote)
             .worktrees(worktrees)
             .timestamp(timestamp)
