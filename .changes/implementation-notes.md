@@ -141,6 +141,18 @@ flag, so empty projects fold away and busy ones stay open without manual clicks.
   not `is_group_collapsed`. Manual-collapse tests became no-op/navigation
   coverage and empty groups render `>`.
 
+### 9. `crates/agent_ui/src/agent_panel.rs` — keep empty projects empty
+
+Closing the last session must leave the project empty so the sidebar can collapse
+and sink it; upstream instead re-seeds a fresh empty draft.
+
+- In `activate_draft`, after the `has_open_project` guard, return early when
+  `!focus && self.draft_thread.is_none()`. The automatic reseeds
+  (`clear_base_view`, `close_terminal_internal`, `remove_thread`, and other
+  panel-sourced calls) pass `focus = false`, so they no longer fabricate a draft
+  when none exists. Explicit "New Thread" passes `focus = true` and still creates
+  one; an already-parked draft is still shown.
+
 ## Matching design (why env token, not pid/cwd)
 
 - cwd collides when several agents run in one directory.
@@ -205,14 +217,22 @@ These bit us on the rebase onto a much newer upstream; re-check them next time.
   `TERM=dumb` (agent/CI shells with no color capability). The publish script
   forces `TERM=xterm-256color` when the caller's `TERM` is `dumb`.
 
-## Known follow-ups
+## Build and publish flow (agent runbook)
 
-- Closing every session in a project still force-creates an empty default draft
-  via `AgentPanel::ensure_draft` (`crates/agent_ui/src/agent_panel.rs`), reached
-  through `clear_base_view` → `activate_draft` → `ensure_draft` when the active
-  thread is archived. That keeps a project from sitting empty, so it never
-  collapses or sinks. Gating `ensure_draft` (skip creation when the project has
-  no threads) is the single best fix point.
+Release builds are slow (~3-10 min) and copying over a running app is unsafe, so
+the build is split from the install. Never kill or overwrite a running Zed Custom.
+
+- Background-safe build: `mise run build:prod` (release build + bundle only; no
+  copy, no block). It records the bundle path for the install step.
+- Install: have the user quit Zed Custom, then `mise run publish:install` (copy +
+  re-sign; never runs cargo). One-shot manual build+install is `mise run publish`.
+- Agent loop: run `build:prod` in the background; when it finishes, confirm the
+  user is ready (installing requires quitting their running Zed Custom), then run
+  `publish:install`. Verify the swap with the inner binary mtime and embedded SHA:
+  `stat -f '%Sm' /Applications/ZedCustom.app/Contents/MacOS/zed` (the `.app`
+  directory mtime is unreliable — ditto preserves source timestamps).
+- See "Tooling gotchas" for the `TERM=dumb` cargo-bundle panic, the untrusted-cert
+  `find-identity -v` trap, and the `hk check`/`fix` hook requirement.
 
 ## Dev tooling (not fork code)
 

@@ -156,6 +156,20 @@ finishes, prompt with AskUserQuestion to confirm the user is ready to copy, sinc
 installing requires quitting their running Zed Custom; on confirmation run
 `publish:install`. Never kill a running Zed Custom — wait for the user to quit.
 
+Verify a swap by the inner binary, not the `.app` dir mtime (ditto preserves
+source timestamps): `stat -f '%Sm' /Applications/ZedCustom.app/Contents/MacOS/zed`.
+
+Build/publish gotchas (full detail in `.changes/implementation-notes.md`): under
+`TERM=dumb` (agent shells) `cargo-bundle` panics `Term(ColorOutOfRange)` — the
+script forces a color TERM; the self-signed dev cert is untrusted so the publish
+guard matches `security find-identity` without `-v`; `hk.pkl` must define `check`
+and `fix` hooks (the editor Stop hook runs `hk check`).
+
+`.changes/implementation-notes.md` is the fork replay log: reapply every
+`// CUSTOM (fork)` change after an upstream rebase and check its rebase gotchas
+(rail icon size, never feed terminal `icon_char`, empty-draft two-line + closable,
+keep-empty-projects-empty draft gate) so the sidebar UI reproduces cleanly.
+
 ### Fork: CLI-agent status plugin
 
 The sidebar tints terminal agent rows from a status file written by the
