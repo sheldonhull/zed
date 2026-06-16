@@ -118,6 +118,29 @@ not line numbers (line numbers drift).
   `status = to_thread_status`, `agent_idle = is_idle()`.
 - In `render_terminal`: `.status(terminal.status).agent_idle(terminal.agent_idle)`.
 
+### 8. `crates/sidebar/src/sidebar.rs` — content-derived collapse + empty sink
+
+Project group collapse is derived from content on every rebuild, not a persisted
+flag, so empty projects fold away and busy ones stay open without manual clicks.
+
+- In `update_entries`/`rebuild_contents`: set `should_load_threads = true` always,
+  then after `has_threads` is computed set `is_collapsed = !has_threads`. A group
+  with any thread/terminal stays expanded; an empty group renders header-only.
+- After the group loop, before building `self.contents`, reorder whole header
+  blocks so empty groups (`has_threads == false`) sink below non-empty ones,
+  stable within each partition. Header blocks tile `entries` from index 0 (no
+  prefix rows), so the split-and-regroup moves owned blocks without cloning.
+- `render_project_header`: `is_collapsed = !has_threads` drives the chevron, so
+  the disclosure is a read-only indicator.
+- `entry_shapes`: set `is_collapsed: !has_threads` so the list-diff identity
+  matches the derived state. The now-unused `multi_workspace` arg is dropped from
+  `entry_shapes` and `apply_list_state_diff`.
+- `toggle_collapse` is a no-op. The fold keybindings still call
+  `set_group_expanded`, which nothing reads anymore.
+- Test helper `visible_entries_as_strings` derives the chevron from `has_threads`,
+  not `is_group_collapsed`. Manual-collapse tests became no-op/navigation
+  coverage and empty groups render `>`.
+
 ## Matching design (why env token, not pid/cwd)
 
 - cwd collides when several agents run in one directory.
@@ -146,6 +169,50 @@ not line numbers (line numbers drift).
 - Several Zed/Warp builds + prod `Zed.app` can run at once; the dev build is the
   one launched from the terminal (`target/debug/zed`). Kill it by EXACT exec path
   (`ps axo pid=,comm= | awk '$2==ABS_BIN'`), never `pkill -f target/debug/zed`.
+
+## Rebase gotchas (upstream drift)
+
+These bit us on the rebase onto a much newer upstream; re-check them next time.
+
+- Status rail size: the `Completed`-status fallback renders `agent_icon`. Build
+  `agent_icon` as an `Icon` at `rail_icon_size` (2.5rem), not `IconSize::Small`,
+  or idle/completed rows show a tiny icon while the spinner stays large. Define
+  `rail_icon_size` before `agent_icon` so the icon can use it.
+- Terminal rail icon: do not feed `icon_char` to terminal `ThreadItem`s.
+  Upstream's `split_leading_icon_char` pulls the title's leading glyph into
+  `icon_char`, and the rail renders that as a tiny `Label` instead of the
+  full-size Terminal icon. Keep the split's stripped title, but drop the
+  `.icon_char(..)` call in `render_terminal`.
+- Empty default draft: upstream blanks the timestamp for `DraftKind::Empty`
+  (collapsing the row to one line) and offers no row action. The fork always
+  formats the timestamp (keeps the two-line row) and offers the discard (`Close`)
+  button for empty drafts too, so the auto-created thread can be dismissed.
+- `ThreadItem` layout conflict: keep the fork title row (`h_6`, a content
+  sub-flex holding only `title_label`, and the `action_slot` overlay built from
+  `row_hover_bg`). The shared post-conflict code references the fork-only
+  `overlay`/`row_hover_bg`, so take the fork side, not the upstream side.
+
+## Tooling gotchas
+
+- `hk.pkl` must define `check` and `fix` hooks, not just `pre-commit`. `hk check`
+  and `hk fix` each run a hook of that name; without them `hk check` aborts with
+  `Hook 'check' not found` (the editor Stop hook runs `hk check`).
+- The `Zed Custom Dev` self-signed cert is untrusted (`CSSMERR_TP_NOT_TRUSTED`),
+  so `security find-identity -v` omits it even though `codesign` signs with it
+  fine. Guard with `find-identity` without `-v` in `cert:create` and the publish
+  script, or signing fails with the cert present.
+- `cargo-bundle` (the zed fork) panics with `Error(Term(ColorOutOfRange))` under
+  `TERM=dumb` (agent/CI shells with no color capability). The publish script
+  forces `TERM=xterm-256color` when the caller's `TERM` is `dumb`.
+
+## Known follow-ups
+
+- Closing every session in a project still force-creates an empty default draft
+  via `AgentPanel::ensure_draft` (`crates/agent_ui/src/agent_panel.rs`), reached
+  through `clear_base_view` → `activate_draft` → `ensure_draft` when the active
+  thread is archived. That keeps a project from sitting empty, so it never
+  collapses or sinks. Gating `ensure_draft` (skip creation when the project has
+  no threads) is the single best fix point.
 
 ## Dev tooling (not fork code)
 
