@@ -1,5 +1,8 @@
-/// CUSTOM (fork): pre-commit hooks for this fork — format + check Rust and scan
-/// for secrets before committing. Not upstream; drop on rebase if it conflicts.
+/// CUSTOM (fork): hk hooks for this fork — format + lint Rust and scan for
+/// secrets. `pre-commit` runs on commit (auto-fix + stash). `check` backs
+/// `hk check` (read-only; used by the editor Stop hook) and `fix` backs
+/// `hk fix` (lets auto-fixers write). The three hooks share the same steps;
+/// keep them in sync. Not upstream; drop on rebase if it conflicts.
 amends "package://github.com/jdx/hk/releases/download/v1.45.0/hk@1.45.0#/Config.pkl"
 import "package://github.com/jdx/hk/releases/download/v1.45.0/hk@1.45.0#/Builtins.pkl"
 
@@ -20,6 +23,36 @@ hooks {
       }
       // trufflehog has no builtin; scan only the changed files in filesystem mode
       // (worktree-safe). Fails the commit on a verified/unknown secret.
+      ["trufflehog"] {
+        glob = "*"
+        check = "trufflehog filesystem {{files}} --no-update --fail --results=verified,unknown"
+      }
+    }
+  }
+  // Backs `hk check` — read-only validation (no fixes written). Used by the editor
+  // Stop hook.
+  ["check"] {
+    steps {
+      ["cargo-fmt"] = Builtins.cargo_fmt
+      ["cargo-clippy"] = Builtins.cargo_clippy
+      ["gitleaks"] {
+        check = "gitleaks git --staged --redact --no-banner ."
+      }
+      ["trufflehog"] {
+        glob = "*"
+        check = "trufflehog filesystem {{files}} --no-update --fail --results=verified,unknown"
+      }
+    }
+  }
+  // Backs `hk fix` — same steps but auto-fixers may write.
+  ["fix"] {
+    fix = true
+    steps {
+      ["cargo-fmt"] = Builtins.cargo_fmt
+      ["cargo-clippy"] = Builtins.cargo_clippy
+      ["gitleaks"] {
+        check = "gitleaks git --staged --redact --no-banner ."
+      }
       ["trufflehog"] {
         glob = "*"
         check = "trufflehog filesystem {{files}} --no-update --fail --results=verified,unknown"
