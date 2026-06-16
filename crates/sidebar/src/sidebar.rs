@@ -528,10 +528,11 @@ struct SidebarContents {
 enum EntryShape {
     ProjectHeader {
         key: ProjectGroupKey,
-        // Toggles the "No threads yet" empty-state row when not collapsed.
+        // Whether the group has any thread/terminal rows. Drives the derived collapse
+        // state below, so a change here re-splices the header in the list diff.
         has_threads: bool,
-        // Determines whether the "No threads yet" row is rendered (only shown when
-        // `!is_collapsed && !has_threads`).
+        // CUSTOM (fork): collapse is derived from content (`!has_threads`); kept in the
+        // shape so the list diff reacts to collapse changes.
         is_collapsed: bool,
     },
     Thread(ThreadId),
@@ -1592,8 +1593,10 @@ impl Sidebar {
 
             let label = group_key.display_name(&path_detail_map);
 
-            let is_collapsed = self.is_group_collapsed(group_key, cx);
-            let should_load_threads = !is_collapsed || !query.is_empty();
+            // CUSTOM (fork): collapse state is derived from content (see `is_collapsed`
+            // below), not a persisted flag, so always load. Empty groups load nothing
+            // and cost little; this lets us measure `has_threads` accurately.
+            let should_load_threads = true;
 
             let is_active = active_workspace
                 .as_ref()
@@ -1864,6 +1867,11 @@ impl Sidebar {
             };
             let has_threads = has_visible_rows || has_stored_thread_rows;
 
+            // CUSTOM (fork): a group is collapsed iff it has no rows to show. Projects
+            // with any thread/terminal stay expanded; empty ones render header-only and
+            // sink to the bottom (see the reorder before `self.contents` is built).
+            let is_collapsed = !has_threads;
+
             if !query.is_empty() {
                 let workspace_highlight_positions =
                     fuzzy_match_positions(&query, &label).unwrap_or_default();
@@ -2014,6 +2022,62 @@ impl Sidebar {
 
         self.live_thread_statuses = new_live_statuses;
 
+        // CUSTOM (fork): sink empty project groups (header-only, `has_threads == false`)
+        // below groups that have content. Each partition keeps its existing order, so
+        // only the empty groups move. Header blocks tile `entries` contiguously from
+        // index 0 (no prefix rows), so split-and-regroup needs no element cloning.
+        if project_header_indices.len() > 1 && project_header_indices.first() == Some(&0) {
+            let block_bounds: Vec<(usize, usize)> = project_header_indices
+                .iter()
+                .enumerate()
+                .map(|(i, &start)| {
+                    let end = project_header_indices
+                        .get(i + 1)
+                        .copied()
+                        .unwrap_or(entries.len());
+                    (start, end)
+                })
+                .collect();
+            let block_has_threads: Vec<bool> = block_bounds
+                .iter()
+                .map(|&(start, _)| {
+                    matches!(
+                        entries.get(start),
+                        Some(ListEntry::ProjectHeader {
+                            has_threads: true,
+                            ..
+                        })
+                    )
+                })
+                .collect();
+
+            if block_has_threads.iter().any(|has_threads| !has_threads) {
+                let mut remaining = std::mem::take(&mut entries);
+                // Split from the back so each `split_off` yields one contiguous block.
+                let mut blocks: Vec<Vec<ListEntry>> = Vec::with_capacity(block_bounds.len());
+                for &(start, _) in block_bounds.iter().rev() {
+                    blocks.push(remaining.split_off(start));
+                }
+                blocks.reverse();
+
+                let mut new_entries: Vec<ListEntry> =
+                    Vec::with_capacity(blocks.iter().map(|block| block.len()).sum());
+                let mut new_header_indices: Vec<usize> = Vec::with_capacity(blocks.len());
+                for keep_with_threads in [true, false] {
+                    for (block, &has_threads) in blocks.iter_mut().zip(block_has_threads.iter()) {
+                        if has_threads != keep_with_threads || block.is_empty() {
+                            continue;
+                        }
+                        new_header_indices.push(new_entries.len());
+                        new_entries.append(block);
+                    }
+                }
+
+                entries = new_entries;
+                project_header_indices = new_header_indices;
+            }
+        }
+
         self.contents = SidebarContents {
             entries,
             notified_threads,
@@ -2051,15 +2115,14 @@ impl Sidebar {
         }
 
         let had_notifications = self.has_notifications(cx);
-        let previous_shapes: Vec<EntryShape> =
-            self.entry_shapes(multi_workspace.read(cx)).collect();
+        let previous_shapes: Vec<EntryShape> = self.entry_shapes().collect();
 
         self.rebuild_contents(cx);
         self.refresh_refilled_draft_times(cx);
         self.refresh_draft_editor_observations(cx);
 
         // Preserve measurements for unchanged entries so sticky headers do not flicker.
-        self.apply_list_state_diff(&previous_shapes, multi_workspace.read(cx));
+        self.apply_list_state_diff(&previous_shapes);
 
         if had_notifications != self.has_notifications(cx) {
             multi_workspace.update(cx, |_, cx| {
@@ -2071,12 +2134,8 @@ impl Sidebar {
     }
 
     /// Splices only the changed entry range, leaving unchanged item measurements intact.
-    fn apply_list_state_diff(
-        &self,
-        previous_shapes: &[EntryShape],
-        multi_workspace: &MultiWorkspace,
-    ) {
-        let mut new_iter = self.entry_shapes(multi_workspace);
+    fn apply_list_state_diff(&self, previous_shapes: &[EntryShape]) {
+        let mut new_iter = self.entry_shapes();
         let mut prefix_len = 0;
         let leading_new = loop {
             match (previous_shapes.get(prefix_len), new_iter.next()) {
@@ -2100,20 +2159,16 @@ impl Sidebar {
         self.list_state.splice(old_changed, new_changed_count);
     }
 
-    fn entry_shapes<'a>(
-        &'a self,
-        multi_workspace: &'a MultiWorkspace,
-    ) -> impl Iterator<Item = EntryShape> + 'a {
+    fn entry_shapes<'a>(&'a self) -> impl Iterator<Item = EntryShape> + 'a {
         self.contents.entries.iter().map(move |entry| match entry {
             ListEntry::ProjectHeader {
                 key, has_threads, ..
             } => EntryShape::ProjectHeader {
                 key: key.clone(),
                 has_threads: *has_threads,
-                is_collapsed: multi_workspace
-                    .group_state_by_key(key)
-                    .map(|state| !state.expanded)
-                    .unwrap_or(false),
+                // CUSTOM (fork): collapse is derived from content, so the diff identity
+                // mirrors `is_collapsed = !has_threads` rather than persisted group state.
+                is_collapsed: !*has_threads,
             },
             ListEntry::Thread(thread) => EntryShape::Thread(thread.metadata.thread_id),
             ListEntry::Terminal(terminal) => EntryShape::Terminal(terminal.metadata.terminal_id),
@@ -2329,7 +2384,9 @@ impl Sidebar {
         let id = SharedString::from(format!("{id_prefix}project-header-{ix}"));
         let group_name = SharedString::from(format!("{id_prefix}header-group-{ix}"));
 
-        let is_collapsed = self.is_group_collapsed(key, cx);
+        // CUSTOM (fork): the chevron mirrors the content-derived collapse state (empty
+        // groups are collapsed), matching `is_collapsed = !has_threads` in update_entries.
+        let is_collapsed = !has_threads;
         let disclosure_icon = if is_collapsed {
             IconName::ChevronRight
         } else {
@@ -3140,13 +3197,13 @@ impl Sidebar {
 
     fn toggle_collapse(
         &mut self,
-        project_group_key: &ProjectGroupKey,
+        _project_group_key: &ProjectGroupKey,
         _window: &mut Window,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) {
-        let is_collapsed = self.is_group_collapsed(project_group_key, cx);
-        self.set_group_expanded(project_group_key, is_collapsed, cx);
-        self.update_entries(cx);
+        // CUSTOM (fork): collapse state is derived from content on every rebuild, so the
+        // disclosure chevron is a read-only indicator. Manual toggling is intentionally a
+        // no-op: a group expands when it has rows and collapses when empty.
     }
 
     fn dispatch_context(&self, window: &Window, cx: &Context<Self>) -> KeyContext {

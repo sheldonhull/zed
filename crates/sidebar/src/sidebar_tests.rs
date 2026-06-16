@@ -548,7 +548,7 @@ fn visible_entries_as_strings(
     sidebar: &Entity<Sidebar>,
     cx: &mut gpui::VisualTestContext,
 ) -> Vec<String> {
-    sidebar.read_with(cx, |sidebar, cx| {
+    sidebar.read_with(cx, |sidebar, _cx| {
         sidebar
             .contents
             .entries
@@ -563,15 +563,13 @@ fn visible_entries_as_strings(
                 match entry {
                     ListEntry::ProjectHeader {
                         label,
-                        key,
+                        has_threads,
                         highlight_positions: _,
                         ..
                     } => {
-                        let icon = if sidebar.is_group_collapsed(key, cx) {
-                            ">"
-                        } else {
-                            "v"
-                        };
+                        // CUSTOM (fork): collapse is derived from content, so the chevron
+                        // mirrors `has_threads` (empty groups render collapsed).
+                        let icon = if *has_threads { "v" } else { ">" };
                         format!("{} [{}]{}", icon, label, selected)
                     }
                     ListEntry::Thread(thread) => {
@@ -704,16 +702,12 @@ async fn test_thread_status_update_does_not_reset_list_measurements(cx: &mut Tes
     cx.run_until_parked();
 
     let before = sidebar.read_with(cx, |sidebar, app| {
-        sidebar
-            .entry_shapes(multi_workspace.read(app))
-            .collect::<Vec<_>>()
+        sidebar.entry_shapes().collect::<Vec<_>>()
     });
     sidebar.update_in(cx, |sidebar, _window, cx| sidebar.update_entries(cx));
     cx.run_until_parked();
     let after = sidebar.read_with(cx, |sidebar, app| {
-        sidebar
-            .entry_shapes(multi_workspace.read(app))
-            .collect::<Vec<_>>()
+        sidebar.entry_shapes().collect::<Vec<_>>()
     });
 
     assert_eq!(
@@ -723,35 +717,35 @@ async fn test_thread_status_update_does_not_reset_list_measurements(cx: &mut Tes
 }
 
 #[gpui::test]
-async fn test_collapse_changes_entry_shape(cx: &mut TestAppContext) {
+async fn test_content_change_changes_entry_shape(cx: &mut TestAppContext) {
+    // Collapse is derived from content, so the shape sequence changes when
+    // content changes (an empty header-only group gains a thread row), not
+    // when toggle_collapse is called.
     let project = init_test_project("/my-project", cx).await;
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
     let sidebar = setup_sidebar(&multi_workspace, cx);
 
-    save_n_test_threads(2, &project, cx).await;
+    multi_workspace.update_in(cx, |_, _window, cx| cx.notify());
     cx.run_until_parked();
 
-    let project_group_key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+    // Empty group: header only.
+    let before = sidebar.read_with(cx, |sidebar, _app| {
+        sidebar.entry_shapes().collect::<Vec<_>>()
+    });
 
-    let before = sidebar.read_with(cx, |sidebar, app| {
-        sidebar
-            .entry_shapes(multi_workspace.read(app))
-            .collect::<Vec<_>>()
-    });
-    sidebar.update_in(cx, |sidebar, window, cx| {
-        sidebar.toggle_collapse(&project_group_key, window, cx);
-    });
+    // Adding a thread makes the group non-empty, changing the shape sequence.
+    save_n_test_threads(1, &project, cx).await;
+    sidebar.update_in(cx, |sidebar, _window, cx| sidebar.update_entries(cx));
     cx.run_until_parked();
-    let after = sidebar.read_with(cx, |sidebar, app| {
-        sidebar
-            .entry_shapes(multi_workspace.read(app))
-            .collect::<Vec<_>>()
+
+    let after = sidebar.read_with(cx, |sidebar, _app| {
+        sidebar.entry_shapes().collect::<Vec<_>>()
     });
 
     assert_ne!(
         before, after,
-        "collapsing the project group should change the shape sequence so the list resets"
+        "adding a thread to an empty group should change the shape sequence"
     );
 }
 
@@ -856,9 +850,10 @@ async fn test_single_workspace_no_threads(cx: &mut TestAppContext) {
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
     let (_sidebar, _panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
 
+    // An empty project group is always collapsed and shows only the header.
     assert_eq!(
         visible_entries_as_strings(&_sidebar, cx),
-        vec!["v [my-project]"]
+        vec!["> [my-project]"]
     );
 }
 
@@ -952,7 +947,10 @@ async fn test_workspace_lifecycle(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn test_collapse_and_expand_group(cx: &mut TestAppContext) {
+async fn test_toggle_collapse_is_noop_with_threads(cx: &mut TestAppContext) {
+    // Collapse is now derived from content: a group with threads is always
+    // expanded, and toggle_collapse is a no-op. Toggling must leave the
+    // rendered entries unchanged.
     let project = init_test_project("/my-project", cx).await;
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
@@ -965,8 +963,9 @@ async fn test_collapse_and_expand_group(cx: &mut TestAppContext) {
     multi_workspace.update_in(cx, |_, _window, cx| cx.notify());
     cx.run_until_parked();
 
+    let before = visible_entries_as_strings(&sidebar, cx);
     assert_eq!(
-        visible_entries_as_strings(&sidebar, cx),
+        before,
         vec![
             //
             "v [my-project]",
@@ -974,7 +973,7 @@ async fn test_collapse_and_expand_group(cx: &mut TestAppContext) {
         ]
     );
 
-    // Collapse
+    // Toggling collapse is a no-op now: the non-empty group stays expanded.
     sidebar.update_in(cx, |s, window, cx| {
         s.toggle_collapse(&project_group_key, window, cx);
     });
@@ -982,33 +981,25 @@ async fn test_collapse_and_expand_group(cx: &mut TestAppContext) {
 
     assert_eq!(
         visible_entries_as_strings(&sidebar, cx),
-        vec![
-            //
-            "> [my-project]",
-        ]
+        before,
+        "toggle_collapse should not change a non-empty group's entries"
     );
 
-    // Expand
+    // Toggling a second time is likewise a no-op.
     sidebar.update_in(cx, |s, window, cx| {
         s.toggle_collapse(&project_group_key, window, cx);
     });
     cx.run_until_parked();
 
-    assert_eq!(
-        visible_entries_as_strings(&sidebar, cx),
-        vec![
-            //
-            "v [my-project]",
-            "  Thread 1",
-        ]
-    );
+    assert_eq!(visible_entries_as_strings(&sidebar, cx), before);
 }
 
 #[gpui::test]
-async fn test_collapse_state_survives_worktree_key_change(cx: &mut TestAppContext) {
+async fn test_threads_survive_worktree_key_change(cx: &mut TestAppContext) {
     // When a worktree is added to a project, the project group key changes.
-    // The sidebar's collapsed/expanded state is keyed by ProjectGroupKey, so
-    // UI state must survive the key change.
+    // The group's threads must remain grouped under the new key. Collapse is
+    // now derived from content, so a group with threads stays expanded across
+    // the key change.
     let (_fs, project) = init_multi_project_test(&["/project-a", "/project-b"], cx).await;
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
@@ -1023,7 +1014,7 @@ async fn test_collapse_state_survives_worktree_key_change(cx: &mut TestAppContex
         vec!["v [project-a]", "  Thread 2", "  Thread 1",]
     );
 
-    // Collapse the group.
+    // Attempting to collapse a non-empty group is a no-op: it stays expanded.
     let old_key = project.read_with(cx, |project, cx| project.project_group_key(cx));
     sidebar.update_in(cx, |sidebar, window, cx| {
         sidebar.toggle_collapse(&old_key, window, cx);
@@ -1032,7 +1023,7 @@ async fn test_collapse_state_survives_worktree_key_change(cx: &mut TestAppContex
 
     assert_eq!(
         visible_entries_as_strings(&sidebar, cx),
-        vec!["> [project-a]"]
+        vec!["v [project-a]", "  Thread 2", "  Thread 1",]
     );
 
     // Add a second worktree — the key changes from [/project-a] to
@@ -1048,10 +1039,39 @@ async fn test_collapse_state_survives_worktree_key_change(cx: &mut TestAppContex
     sidebar.update_in(cx, |sidebar, _window, cx| sidebar.update_entries(cx));
     cx.run_until_parked();
 
-    // The group should still be collapsed under the new key.
+    // The threads remain grouped under the new key, still expanded.
     assert_eq!(
         visible_entries_as_strings(&sidebar, cx),
-        vec!["> [project-a, project-b]"]
+        vec!["v [project-a, project-b]", "  Thread 2", "  Thread 1",]
+    );
+}
+
+#[gpui::test]
+async fn test_empty_groups_collapse_and_sink_to_bottom(cx: &mut TestAppContext) {
+    // Collapse is derived from content: a group with threads is always
+    // expanded, an empty group is always collapsed (header only), and empty
+    // groups sink below all non-empty groups.
+    let (fs, project_a) = init_multi_project_test(&["/project-a", "/project-b"], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+
+    // project-a has a thread; project-b is opened but has none.
+    save_n_test_threads(1, &project_a, cx).await;
+    let _workspace_b = add_test_project("/project-b", &fs, &multi_workspace, cx).await;
+    sidebar.update_in(cx, |sidebar, _window, cx| sidebar.update_entries(cx));
+    cx.run_until_parked();
+
+    // Non-empty group (expanded) appears first; empty group (collapsed,
+    // header only) sinks to the bottom.
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx),
+        vec![
+            //
+            "v [project-a]",
+            "  Thread 1",
+            "> [project-b]",
+        ]
     );
 }
 
@@ -1399,7 +1419,9 @@ async fn test_keyboard_focus_in_does_not_set_selection(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
-async fn test_keyboard_confirm_on_project_header_toggles_collapse(cx: &mut TestAppContext) {
+async fn test_keyboard_confirm_on_project_header_is_noop(cx: &mut TestAppContext) {
+    // Confirm on a project header no longer toggles collapse; collapse is
+    // derived from content. The non-empty group stays expanded.
     let project = init_test_project("/my-project", cx).await;
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
@@ -1424,7 +1446,7 @@ async fn test_keyboard_confirm_on_project_header_toggles_collapse(cx: &mut TestA
         sidebar.selection = Some(0);
     });
 
-    // Confirm on project header collapses the group
+    // Confirm on the project header does not collapse the group.
     cx.dispatch_action(Confirm);
     cx.run_until_parked();
 
@@ -1432,11 +1454,12 @@ async fn test_keyboard_confirm_on_project_header_toggles_collapse(cx: &mut TestA
         visible_entries_as_strings(&sidebar, cx),
         vec![
             //
-            "> [my-project]  <== selected",
+            "v [my-project]  <== selected",
+            "  Thread 1",
         ]
     );
 
-    // Confirm again expands the group
+    // Confirming again is likewise a no-op.
     cx.dispatch_action(Confirm);
     cx.run_until_parked();
 
@@ -1452,6 +1475,9 @@ async fn test_keyboard_confirm_on_project_header_toggles_collapse(cx: &mut TestA
 
 #[gpui::test]
 async fn test_keyboard_expand_and_collapse_selected_entry(cx: &mut TestAppContext) {
+    // Collapse is derived from content, so SelectParent/SelectChild no longer
+    // collapse/expand. They still move selection: SelectChild on an expanded
+    // header moves selection to the first child.
     let project = init_test_project("/my-project", cx).await;
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
@@ -1470,27 +1496,33 @@ async fn test_keyboard_expand_and_collapse_selected_entry(cx: &mut TestAppContex
         ]
     );
 
-    // Focus sidebar and manually select the header (index 0). Press left to collapse.
+    // Focus sidebar and manually select the header (index 0).
     focus_sidebar(&sidebar, cx);
     sidebar.update_in(cx, |sidebar, _window, _cx| {
         sidebar.selection = Some(0);
     });
 
-    cx.dispatch_action(SelectParent);
+    // SelectChild on the expanded header moves selection to the first child
+    // (the group is non-empty so it is always expanded).
+    cx.dispatch_action(SelectChild);
     cx.run_until_parked();
 
+    assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(1));
     assert_eq!(
         visible_entries_as_strings(&sidebar, cx),
         vec![
             //
-            "> [my-project]  <== selected",
+            "v [my-project]",
+            "  Thread 1  <== selected",
         ]
     );
 
-    // Press right to expand
-    cx.dispatch_action(SelectChild);
+    // SelectParent from the child selects the parent header; the group stays
+    // expanded.
+    cx.dispatch_action(SelectParent);
     cx.run_until_parked();
 
+    assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(0));
     assert_eq!(
         visible_entries_as_strings(&sidebar, cx),
         vec![
@@ -1499,10 +1531,6 @@ async fn test_keyboard_expand_and_collapse_selected_entry(cx: &mut TestAppContex
             "  Thread 1",
         ]
     );
-
-    // Press right again on already-expanded header moves selection down
-    cx.dispatch_action(SelectChild);
-    assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(1));
 }
 
 #[gpui::test]
@@ -1531,7 +1559,8 @@ async fn test_keyboard_collapse_from_child_selects_parent(cx: &mut TestAppContex
         ]
     );
 
-    // Pressing left on a child collapses the parent group and selects it
+    // Pressing left on a child selects the parent header. The group stays
+    // expanded (collapse is derived from content).
     cx.dispatch_action(SelectParent);
     cx.run_until_parked();
 
@@ -1540,7 +1569,8 @@ async fn test_keyboard_collapse_from_child_selects_parent(cx: &mut TestAppContex
         visible_entries_as_strings(&sidebar, cx),
         vec![
             //
-            "> [my-project]  <== selected",
+            "v [my-project]  <== selected",
+            "  Thread 1",
         ]
     );
 }
@@ -1552,10 +1582,11 @@ async fn test_keyboard_navigation_on_empty_list(cx: &mut TestAppContext) {
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
     let (sidebar, _panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
 
-    // An empty project has only the header (no auto-created draft).
+    // An empty project has only the header (no auto-created draft) and is
+    // always collapsed.
     assert_eq!(
         visible_entries_as_strings(&sidebar, cx),
-        vec!["v [empty-project]"]
+        vec!["> [empty-project]"]
     );
 
     // Focus sidebar — focus_in does not set a selection
@@ -1813,11 +1844,11 @@ async fn test_closing_last_agent_panel_terminal_restores_empty_header(cx: &mut T
     });
     cx.run_until_parked();
 
-    // Collapsed: header hides children but still reports the placeholder
-    // as a thread present in the group.
+    // toggle_collapse is a no-op now: the group has a placeholder row, so it
+    // stays expanded and still reports a thread present in the group.
     assert_eq!(
         visible_entries_as_strings(&sidebar, cx),
-        vec!["> [my-project]"]
+        vec!["v [my-project]", "  New Zed Agent Thread"]
     );
     assert_project_header_has_threads(&sidebar, "my-project", true, cx);
 }
@@ -4396,7 +4427,7 @@ async fn test_search_matches_workspace_name(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn test_search_finds_threads_inside_collapsed_groups(cx: &mut TestAppContext) {
+async fn test_search_finds_threads(cx: &mut TestAppContext) {
     let project = init_test_project("/my-project", cx).await;
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
@@ -4413,30 +4444,24 @@ async fn test_search_finds_threads_inside_collapsed_groups(cx: &mut TestAppConte
     );
     cx.run_until_parked();
 
-    // User focuses the sidebar and collapses the group using keyboard:
-    // manually select the header, then press SelectParent to collapse.
+    // The group has a thread, so it is always expanded.
     focus_sidebar(&sidebar, cx);
-    sidebar.update_in(cx, |sidebar, _window, _cx| {
-        sidebar.selection = Some(0);
-    });
-    cx.dispatch_action(SelectParent);
-    cx.run_until_parked();
-
     assert_eq!(
         visible_entries_as_strings(&sidebar, cx),
         vec![
             //
-            "> [my-project]  <== selected",
+            "v [my-project]",
+            "  Important thread",
         ]
     );
 
-    // User types a search — the thread appears even though its group is collapsed.
+    // User types a search — the matching thread is surfaced and selected.
     type_in_search(&sidebar, "important", cx);
     assert_eq!(
         visible_entries_as_strings(&sidebar, cx),
         vec![
             //
-            "> [my-project]",
+            "v [my-project]",
             "  Important thread  <== selected",
         ]
     );
@@ -4726,11 +4751,11 @@ async fn test_confirm_on_historical_thread_in_new_project_group_opens_real_threa
     assert_eq!(
         entries_before,
         vec![
-            "v [project-a]",
             "v [project-b]",
             "  Historical Thread in New Group",
+            "> [project-a]",
         ],
-        "expected the closed project group to show the historical thread before first open"
+        "expected the non-empty closed group to sort above the empty open group and show the historical thread before first open"
     );
 
     assert_eq!(
@@ -4740,7 +4765,9 @@ async fn test_confirm_on_historical_thread_in_new_project_group_opens_real_threa
     );
 
     sidebar.update_in(cx, |sidebar, window, cx| {
-        sidebar.selection = Some(2);
+        // The historical thread row is at index 1 (project-b sorts first as the
+        // only non-empty group; empty project-a sinks below).
+        sidebar.selection = Some(1);
         sidebar.confirm(&Confirm, window, cx);
     });
 
@@ -9017,14 +9044,16 @@ async fn test_linked_worktree_threads_not_duplicated_across_groups(cx: &mut Test
     cx.run_until_parked();
 
     // The thread should appear only under [project] (the dedicated
-    // group for the /project repo), not under [other, project].
+    // group for the /project repo), not under [other, project]. The
+    // non-empty [project] group sorts first; the empty [other, project]
+    // group is collapsed and sinks to the bottom.
     assert_eq!(
         visible_entries_as_strings(&sidebar, cx),
         vec![
             //
-            "v [other, project]",
             "v [project]",
             "  Worktree Thread {wt-feature-a}",
+            "> [other, project]",
         ]
     );
 }
@@ -11627,7 +11656,7 @@ async fn test_startup_failed_restoration_shows_no_draft(cx: &mut TestAppContext)
     let entries = visible_entries_as_strings(&sidebar, cx);
     assert_eq!(
         entries,
-        vec!["v [my-project]"],
+        vec!["> [my-project]"],
         "empty group should show only the header, no auto-created draft"
     );
 }
