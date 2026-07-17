@@ -2039,8 +2039,12 @@ impl AgentPanel {
     ) {
         let terminal_working_directory = working_directory.clone();
         let init_command = Self::terminal_init_command(run_init_command, cx);
+        // CUSTOM (fork): inject a stable per-terminal id so CLI agents and their
+        // (detached) hooks can report status back to this exact terminal row.
+        let extra_env =
+            HashMap::from_iter([("ZED_TERMINAL_ID".to_string(), terminal_id.to_string())]);
         let terminal_task = self.project.update(cx, |project, cx| {
-            project.create_terminal_shell(working_directory, cx)
+            project.create_terminal_shell_with_env(working_directory, extra_env, cx)
         });
         let workspace = self.workspace.clone();
         let workspace_id = self.workspace_id;
@@ -2948,6 +2952,16 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         if !self.has_open_project(cx) {
+            return;
+        }
+
+        // CUSTOM (fork): don't fabricate a draft for an automatic (unfocused)
+        // reseed when none already exists — e.g. after closing the last session,
+        // `clear_base_view`/`close_*`/`remove_thread` call this with focus=false.
+        // Suppressing creation lets a project sit empty (and the sidebar collapse
+        // it and sink it). Explicit "New Thread" passes focus=true and still
+        // creates one; an already-parked draft is still shown.
+        if !focus && self.draft_thread.is_none() {
             return;
         }
 

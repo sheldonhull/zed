@@ -292,7 +292,20 @@ impl Project {
         cwd: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) -> Task<Result<Entity<Terminal>>> {
-        self.create_terminal_shell_internal(cwd, false, cx)
+        self.create_terminal_shell_internal(cwd, false, HashMap::default(), cx)
+    }
+
+    /// CUSTOM (fork): like `create_terminal_shell`, but merges `extra_env` into the
+    /// spawned shell's environment. Used by the agent panel to inject a stable
+    /// `ZED_TERMINAL_ID` that CLI agents (and their detached hooks) inherit, so the
+    /// agent sidebar can match a reported status back to this exact terminal.
+    pub fn create_terminal_shell_with_env(
+        &mut self,
+        cwd: Option<PathBuf>,
+        extra_env: HashMap<String, String>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<Terminal>>> {
+        self.create_terminal_shell_internal(cwd, false, extra_env, cx)
     }
 
     /// Creates a local terminal even if the project is remote.
@@ -309,16 +322,18 @@ impl Project {
             // Local project: use project directory like normal terminals
             self.active_project_directory(cx).map(|p| p.to_path_buf())
         };
-        self.create_terminal_shell_internal(working_directory, true, cx)
+        self.create_terminal_shell_internal(working_directory, true, HashMap::default(), cx)
     }
 
     /// Internal method for creating terminal shells.
     /// If force_local is true, creates a local terminal even if the project has a remote client.
     /// This allows "breaking out" to a local shell in remote projects.
+    /// `extra_env` is merged into the resolved environment (fork addition).
     fn create_terminal_shell_internal(
         &mut self,
         cwd: Option<PathBuf>,
         force_local: bool,
+        extra_env: HashMap<String, String>,
         cx: &mut Context<Self>,
     ) -> Task<Result<Entity<Terminal>>> {
         let path = cwd.map(|p| Arc::from(&*p));
@@ -382,6 +397,8 @@ impl Project {
             let shell_kind = ShellKind::new(&shell, path_style.is_windows());
             let mut env = env_task.await.unwrap_or_default();
             env.extend(settings.env);
+            // CUSTOM (fork): merge caller-provided env (e.g. ZED_TERMINAL_ID).
+            env.extend(extra_env);
 
             let activation_script = maybe!(async {
                 for toolchain in toolchains {

@@ -1,0 +1,8 @@
+{
+  "name": "zed-cli-agent",
+  "version": "0.1.0",
+  "description": "Report Claude Code session status to the Zed agent sidebar via a status file, so terminal threads tint by live state (running / needs-input / idle / done / error).",
+  "author": {
+    "name": "Zed fork"
+  }
+}

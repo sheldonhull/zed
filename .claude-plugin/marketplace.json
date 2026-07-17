@@ -1,0 +1,17 @@
+{
+  "name": "zed-fork-tools",
+  "owner": {
+    "name": "Zed fork"
+  },
+  "metadata": {
+    "description": "Fork-local Claude Code plugins for this Zed fork.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "zed-cli-agent",
+      "source": "./tooling/zed-cli-agent-status/plugins/zed-cli-agent",
+      "description": "Report Claude Code session status to the Zed agent sidebar so terminal threads tint by live state (running / needs-input / idle / done / error)."
+    }
+  ]
+}

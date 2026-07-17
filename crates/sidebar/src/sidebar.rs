@@ -1,5 +1,8 @@
 mod thread_switcher;
 
+// CUSTOM (fork): reads CLI-agent session status from the side-channel status dir.
+mod cli_agent_status;
+
 use acp_thread::ThreadStatus;
 use action_log::DiffStats;
 use agent::{ThreadStore, ZED_AGENT_ID};
@@ -367,6 +370,10 @@ struct TerminalEntry {
     workspace: ThreadEntryWorkspace,
     worktrees: Vec<ThreadItemWorktreeInfo>,
     has_notification: bool,
+    // CUSTOM (fork): live CLI-agent status for this terminal, matched by id.
+    status: AgentThreadStatus,
+    // CUSTOM (fork): true when an agent is present but idle/done (vs plain terminal).
+    agent_idle: bool,
     highlight_positions: Vec<usize>,
 }
 
@@ -522,10 +529,11 @@ struct SidebarContents {
 enum EntryShape {
     ProjectHeader {
         key: ProjectGroupKey,
-        // Toggles the "No threads yet" empty-state row when not collapsed.
+        // Whether the group has any thread/terminal rows. Drives the derived collapse
+        // state below, so a change here re-splices the header in the list diff.
         has_threads: bool,
-        // Determines whether the "No threads yet" row is rendered (only shown when
-        // `!is_collapsed && !has_threads`).
+        // CUSTOM (fork): collapse is derived from content (`!has_threads`); kept in the
+        // shape so the list diff reacts to collapse changes.
         is_collapsed: bool,
     },
     Thread(ThreadId),
@@ -823,6 +831,11 @@ pub struct Sidebar {
     /// Display names of other release channels that have threads available to
     /// import.
     cross_channel_import_channels: Vec<SharedString>,
+    /// CUSTOM (fork): latest CLI-agent statuses keyed by project directory, polled
+    /// from the side-channel status dir written by the zed-cli-agent plugin. Used
+    /// to tint terminal thread rows by live agent state.
+    cli_agent_statuses: HashMap<String, cli_agent_status::CliAgentStatus>,
+    _cli_agent_status_poll: Task<()>,
 }
 
 impl Sidebar {
@@ -920,6 +933,28 @@ impl Sidebar {
             this.schedule_update_entries(false, cx);
         });
 
+        // CUSTOM (fork): poll the CLI-agent status directory off the UI thread so
+        // terminal rows reflect live agent state. Rebuilds entries only on change.
+        let cli_agent_status_poll = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(1000))
+                    .await;
+                let next = cx
+                    .background_spawn(async { cli_agent_status::read_all() })
+                    .await;
+                let still_alive = this.update(cx, |this, cx| {
+                    if this.cli_agent_statuses != next {
+                        this.cli_agent_statuses = next;
+                        this.update_entries(cx);
+                    }
+                });
+                if still_alive.is_err() {
+                    break;
+                }
+            }
+        });
+
         Self {
             multi_workspace: multi_workspace.downgrade(),
             width: DEFAULT_WIDTH,
@@ -954,6 +989,8 @@ impl Sidebar {
             update_task: None,
             import_banners_use_verbose_labels: None,
             cross_channel_import_channels: Vec::new(),
+            cli_agent_statuses: HashMap::new(),
+            _cli_agent_status_poll: cli_agent_status_poll,
         }
     }
 
@@ -1489,17 +1526,31 @@ impl Sidebar {
             };
             let linked_worktree_path_lists =
                 linked_worktree_path_lists_for_workspaces(group_workspaces, cx);
+            // CUSTOM (fork): snapshot CLI-agent statuses so the closure does not
+            // borrow `self`; the map is small (one entry per active agent).
+            let cli_agent_statuses = self.cli_agent_statuses.clone();
             let make_terminal_entry =
                 |metadata: TerminalThreadMetadata, workspace: ThreadEntryWorkspace| {
                     let worktrees =
                         worktree_info_from_thread_paths(&metadata.worktree_paths, &branch_by_path);
                     let has_notification =
                         live_notified_terminal_ids.contains(&metadata.terminal_id);
+                    // CUSTOM (fork): match this terminal to a reported status by the
+                    // injected ZED_TERMINAL_ID (the terminal id the agent inherits).
+                    let cli_status = cli_agent_statuses
+                        .get(&metadata.terminal_id.to_string())
+                        .copied();
+                    let status = cli_status
+                        .map(|status| status.to_thread_status())
+                        .unwrap_or_default();
+                    let agent_idle = cli_status.is_some_and(|status| status.is_idle());
                     TerminalEntry {
                         metadata,
                         workspace,
                         worktrees,
                         has_notification,
+                        status,
+                        agent_idle,
                         highlight_positions: Vec::new(),
                     }
                 };
@@ -1574,8 +1625,10 @@ impl Sidebar {
 
             let label = group_key.display_name(&path_detail_map);
 
-            let is_collapsed = self.is_group_collapsed(group_key, cx);
-            let should_load_threads = !is_collapsed || !query.is_empty();
+            // CUSTOM (fork): collapse state is derived from content (see `is_collapsed`
+            // below), not a persisted flag, so always load. Empty groups load nothing
+            // and cost little; this lets us measure `has_threads` accurately.
+            let should_load_threads = true;
 
             let is_active = active_workspace
                 .as_ref()
@@ -1846,6 +1899,11 @@ impl Sidebar {
             };
             let has_threads = has_visible_rows || has_stored_thread_rows;
 
+            // CUSTOM (fork): a group is collapsed iff it has no rows to show. Projects
+            // with any thread/terminal stay expanded; empty ones render header-only and
+            // sink to the bottom (see the reorder before `self.contents` is built).
+            let is_collapsed = !has_threads;
+
             if !query.is_empty() {
                 let workspace_highlight_positions =
                     fuzzy_match_positions(&query, &label).unwrap_or_default();
@@ -1996,6 +2054,62 @@ impl Sidebar {
 
         self.live_thread_statuses = new_live_statuses;
 
+        // CUSTOM (fork): sink empty project groups (header-only, `has_threads == false`)
+        // below groups that have content. Each partition keeps its existing order, so
+        // only the empty groups move. Header blocks tile `entries` contiguously from
+        // index 0 (no prefix rows), so split-and-regroup needs no element cloning.
+        if project_header_indices.len() > 1 && project_header_indices.first() == Some(&0) {
+            let block_bounds: Vec<(usize, usize)> = project_header_indices
+                .iter()
+                .enumerate()
+                .map(|(i, &start)| {
+                    let end = project_header_indices
+                        .get(i + 1)
+                        .copied()
+                        .unwrap_or(entries.len());
+                    (start, end)
+                })
+                .collect();
+            let block_has_threads: Vec<bool> = block_bounds
+                .iter()
+                .map(|&(start, _)| {
+                    matches!(
+                        entries.get(start),
+                        Some(ListEntry::ProjectHeader {
+                            has_threads: true,
+                            ..
+                        })
+                    )
+                })
+                .collect();
+
+            if block_has_threads.iter().any(|has_threads| !has_threads) {
+                let mut remaining = std::mem::take(&mut entries);
+                // Split from the back so each `split_off` yields one contiguous block.
+                let mut blocks: Vec<Vec<ListEntry>> = Vec::with_capacity(block_bounds.len());
+                for &(start, _) in block_bounds.iter().rev() {
+                    blocks.push(remaining.split_off(start));
+                }
+                blocks.reverse();
+
+                let mut new_entries: Vec<ListEntry> =
+                    Vec::with_capacity(blocks.iter().map(|block| block.len()).sum());
+                let mut new_header_indices: Vec<usize> = Vec::with_capacity(blocks.len());
+                for keep_with_threads in [true, false] {
+                    for (block, &has_threads) in blocks.iter_mut().zip(block_has_threads.iter()) {
+                        if has_threads != keep_with_threads || block.is_empty() {
+                            continue;
+                        }
+                        new_header_indices.push(new_entries.len());
+                        new_entries.append(block);
+                    }
+                }
+
+                entries = new_entries;
+                project_header_indices = new_header_indices;
+            }
+        }
+
         self.contents = SidebarContents {
             entries,
             notified_threads,
@@ -2033,15 +2147,14 @@ impl Sidebar {
         }
 
         let had_notifications = self.has_notifications(cx);
-        let previous_shapes: Vec<EntryShape> =
-            self.entry_shapes(multi_workspace.read(cx)).collect();
+        let previous_shapes: Vec<EntryShape> = self.entry_shapes().collect();
 
         self.rebuild_contents(cx);
         self.refresh_refilled_draft_times(cx);
         self.refresh_draft_editor_observations(cx);
 
         // Preserve measurements for unchanged entries so sticky headers do not flicker.
-        self.apply_list_state_diff(&previous_shapes, multi_workspace.read(cx));
+        self.apply_list_state_diff(&previous_shapes);
 
         self.prefetch_worktree_default_branches(cx);
 
@@ -2055,12 +2168,8 @@ impl Sidebar {
     }
 
     /// Splices only the changed entry range, leaving unchanged item measurements intact.
-    fn apply_list_state_diff(
-        &self,
-        previous_shapes: &[EntryShape],
-        multi_workspace: &MultiWorkspace,
-    ) {
-        let mut new_iter = self.entry_shapes(multi_workspace);
+    fn apply_list_state_diff(&self, previous_shapes: &[EntryShape]) {
+        let mut new_iter = self.entry_shapes();
         let mut prefix_len = 0;
         let leading_new = loop {
             match (previous_shapes.get(prefix_len), new_iter.next()) {
@@ -2084,20 +2193,16 @@ impl Sidebar {
         self.list_state.splice(old_changed, new_changed_count);
     }
 
-    fn entry_shapes<'a>(
-        &'a self,
-        multi_workspace: &'a MultiWorkspace,
-    ) -> impl Iterator<Item = EntryShape> + 'a {
+    fn entry_shapes<'a>(&'a self) -> impl Iterator<Item = EntryShape> + 'a {
         self.contents.entries.iter().map(move |entry| match entry {
             ListEntry::ProjectHeader {
                 key, has_threads, ..
             } => EntryShape::ProjectHeader {
                 key: key.clone(),
                 has_threads: *has_threads,
-                is_collapsed: multi_workspace
-                    .group_state_by_key(key)
-                    .map(|state| !state.expanded)
-                    .unwrap_or(false),
+                // CUSTOM (fork): collapse is derived from content, so the diff identity
+                // mirrors `is_collapsed = !has_threads` rather than persisted group state.
+                is_collapsed: !*has_threads,
             },
             ListEntry::Thread(thread) => EntryShape::Thread(thread.metadata.thread_id),
             ListEntry::Terminal(terminal) => EntryShape::Terminal(terminal.metadata.terminal_id),
@@ -2313,7 +2418,9 @@ impl Sidebar {
         let id = SharedString::from(format!("{id_prefix}project-header-{ix}"));
         let group_name = SharedString::from(format!("{id_prefix}header-group-{ix}"));
 
-        let is_collapsed = self.is_group_collapsed(key, cx);
+        // CUSTOM (fork): the chevron mirrors the content-derived collapse state (empty
+        // groups are collapsed), matching `is_collapsed = !has_threads` in update_entries.
+        let is_collapsed = !has_threads;
         let disclosure_icon = if is_collapsed {
             IconName::ChevronRight
         } else {
@@ -3260,13 +3367,13 @@ impl Sidebar {
 
     fn toggle_collapse(
         &mut self,
-        project_group_key: &ProjectGroupKey,
+        _project_group_key: &ProjectGroupKey,
         _window: &mut Window,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) {
-        let is_collapsed = self.is_group_collapsed(project_group_key, cx);
-        self.set_group_expanded(project_group_key, is_collapsed, cx);
-        self.update_entries(cx);
+        // CUSTOM (fork): collapse state is derived from content on every rebuild, so the
+        // disclosure chevron is a read-only indicator. Manual toggling is intentionally a
+        // no-op: a group expands when it has rows and collapses when empty.
     }
 
     fn dispatch_context(&self, window: &Window, cx: &Context<Self>) -> KeyContext {
@@ -6285,7 +6392,6 @@ impl Sidebar {
         let is_hovered = self.hovered_thread_index == Some(ix);
         let is_selected = is_active;
         let is_draft = thread.draft.is_some();
-        let is_empty_draft = thread.draft == Some(DraftKind::Empty);
         let is_running = matches!(
             thread.status,
             AgentThreadStatus::Running | AgentThreadStatus::WaitingForConfirmation
@@ -6304,11 +6410,11 @@ impl Sidebar {
             .title_bar_background
             .blend(color.panel_background.opacity(0.25));
 
-        let timestamp: SharedString = if is_empty_draft {
-            SharedString::default()
-        } else {
-            format_history_entry_timestamp(Self::thread_display_time(&thread.metadata)).into()
-        };
+        // CUSTOM (fork): always show the relative time, even for the auto-created
+        // empty draft, so the default thread keeps its two-line layout. Upstream
+        // blanks this for empty drafts, which collapses the row to a single line.
+        let timestamp: SharedString =
+            format_history_entry_timestamp(Self::thread_display_time(&thread.metadata)).into();
 
         let is_remote = thread.workspace.is_remote(cx);
 
@@ -6424,8 +6530,10 @@ impl Sidebar {
                     )
                 } else {
                     match thread.draft {
-                        Some(DraftKind::Empty) => None,
-                        Some(DraftKind::WithContent) => Some(
+                        // CUSTOM (fork): allow discarding the empty default draft too,
+                        // so the auto-created thread can be dismissed. Upstream offers no
+                        // action for empty drafts.
+                        Some(DraftKind::Empty) | Some(DraftKind::WithContent) => Some(
                             IconButton::new("discard_thread", IconName::Close)
                                 .icon_size(IconSize::Small)
                                 .tooltip(Tooltip::text("Discard Draft"))
@@ -6655,7 +6763,11 @@ impl Sidebar {
         let is_remote = terminal.workspace.is_remote(cx);
 
         let display_title = terminal.metadata.display_title();
-        let (icon_char, title, highlight_positions) =
+        // CUSTOM (fork): strip a leading glyph from the title for display, but do NOT
+        // feed it as `icon_char`. The left rail already shows a large status icon; if
+        // `icon_char` is set, the rail renders that glyph as a tiny label instead of
+        // the full-size Terminal icon.
+        let (_icon_char, title, highlight_positions) =
             match split_leading_icon_char(&display_title, &terminal.highlight_positions) {
                 Some((icon_char, title, positions)) => (Some(icon_char), title, positions),
                 None => (None, display_title, terminal.highlight_positions.clone()),
@@ -6664,11 +6776,13 @@ impl Sidebar {
         ThreadItem::new(id, title)
             .base_bg(sidebar_bg)
             .icon(IconName::Terminal)
-            .when_some(icon_char, |this, icon_char| this.icon_char(icon_char))
             .is_remote(is_remote)
             .worktrees(worktrees)
             .timestamp(timestamp)
             .notified(terminal.has_notification)
+            // CUSTOM (fork): tint + status icon driven by the reported CLI-agent state.
+            .status(terminal.status)
+            .agent_idle(terminal.agent_idle)
             .highlight_positions(highlight_positions)
             .selected(is_active)
             .focused(is_focused)
